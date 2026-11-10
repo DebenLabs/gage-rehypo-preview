@@ -1,0 +1,185 @@
+{
+  "chainId": 4663,
+  "PoolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+  "PositionManager": "0x58daec3116aae6D93017bAAea7749052E8a04fA7",
+  "StateView": "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b",
+  "Permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+  "UniversalRouter": "0x8876789976dEcBfCbBbe364623C63652db8C0904",
+  "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+  "generationDeployer": {
+    "address": "0xcea38204C97e9745f831978357d562E5CcC6834F",
+    "startBlock": 106649281
+  },
+  "intentV1": {
+    "factory": "0xb086944b140758b33694220d4fe93c9a8d8618a1",
+    "core": "0x0086ec1540719d4199432797e2b6068e6ae5a0e5",
+    "reserve": "0xbeeff033f34c046626b8d0a041844c5d1a5409dd",
+    "quoteVerifier": "0x6a42924c195c6a38427320c1b49130998a7e75e1",
+    "fillRouter": "0xae9607acb7e14bd37cb714cff8f35b30443133c8",
+    "startBlock": 106016490,
+    "loopRouter": "0xa46b62d5277465a885de5f2dc518d369199aa93c",
+    "privateRouter": "0xDbb8e949659D0d0d2EDB075b9eC84C9E479bAA45",
+    "previousPrivateLanes": [
+      {
+        "core": "0x856e4232469b957150cb29a8ce9b60059449e87e",
+        "routers": [
+          "0xc62da1872bf3c9922e8c22be4b29b5317b4baa21"
+        ],
+        "startBlock": 88949068
+      }
+    ],
+    "exitDesk": "0x0c7e23f245377551a7fac3b3d05238ac2e9eefc2",
+    "oneDayPriceSource": "0xbF042AE7216Ed5176790e19F463DbAB878f5caE8",
+    "rolloverRouter": "0x3bee806F87386e71713516bA0b91dAE21D576f72"
+  },
+  "intentV1Assets": {
+    "GLD": {
+      "lendAsset": {
+        "token": "0xC9a981FEE1F9DEc688bb123ccDeCc63D0deBFC4e",
+        "decimals": 18
+      },
+      "factory": "0x2a09498f11a70c4f2ab0a4e1b3323699bf7cc143",
+      "core": "0x1e8bd7348c84ab0a0fabe61dca1249f75b4e9275",
+      "reserve": "0x799bb6b361e1e310d4bc9e31901e5b89ec3153b2",
+      "quoteVerifier": "0x619781e2af98973fe8200e70fd77bdd782dfc673",
+      "fillRouter": "0x6e07b640af910b8ef1c7e2e6b24a417558061f53",
+      "gradeRegistry": "0xf15d75520bcebd6a1a9ffcdcfdcaba6f9474c0b3",
+      "feeProcessor": "0xcab24b35f7a3b4fcc958ac56422f0d86a77c84f2",
+      "startBlock": 106236013,
+      "engine": {
+        "registry": "0x79e64d21f0514bc5aaafc332d1a1096f0368ae4c",
+        "rewards": "0xa83939Ff28EcdB75D96C653717CF07a638ecA4Af",
+        "cashoutRouter": "0x2d89e340e2ef83729fb6dc9da61e425fa0e46d70",
+        "flashPool": "0x98996e833EA35EC17c3645Ca7b6Dd40d188564C4",
+        "startBlock": 106235739
+      },
+      "collateral": [
+        {
+          "token": "0x42aFA2124ca5a2B83898E46B2dA9a190995b1E18"
+        }
+      ],
+      "cashoutPools": [
+        {
+          "currency0": "0x42afa2124ca5a2b83898e46b2da9a190995b1e18",
+          "currency1": "0xc9a981fee1f9dec688bb123ccdecc63d0debfc4e",
+          "fee": 8388608,
+          "tickSpacing": 8,
+          "hooks": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
+          "poolId": "0xc749412e31087a6e6f9210af575bc9100159fbc9f45da3ca8b26b31f3bf5777e"
+        }
+      ],
+      "exitDesk": "0x0c7e23f245377551a7fac3b3d05238ac2e9eefc2",
+      "rolloverRouter": "0xb078114872369a5f43E9b8548C501dbb88ef84ac"
+    },
+    "NVDA": {
+      "lendAsset": {
+        "token": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        "decimals": 18
+      },
+      "factory": "0xd1fc8951289372c7260ac0f7bc830baba49f109c",
+      "core": "0xe0ddd6869677d3f5a2bc48375fc899b10a6848e1",
+      "reserve": "0xb384a8419931703f651d87a02856ced67141139f",
+      "quoteVerifier": "0xdf320f2fd7d6075571e0f083ff04571d9acdeb46",
+      "fillRouter": "0x9c748ebd8f7691e1ac9e670e0de96920791d9932",
+      "gradeRegistry": "0xca7e4819383f1842f42e64d7e12e066551ac4757",
+      "feeProcessor": "0x5ef8697a5fd43d4c593c6e087d0f2a2b8ff2e584",
+      "startBlock": 106243672,
+      "engine": {
+        "registry": "0x1897cb1bfc61507259073086810f94bcfb609955",
+        "rewards": "0x25c3976ca28D2B9265050D290a58dF46864A2D5d",
+        "cashoutRouter": "0xf30ad2ed957e74d36774168c63dfc43c8b025e91",
+        "flashPool": "0x62AB521f71431f78ac374CdbadC6cda3c8916b6C",
+        "startBlock": 106243411
+      },
+      "collateral": [
+        {
+          "token": "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18"
+        },
+        {
+          "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+        },
+        {
+          "token": "0xD5f1afEA47b1A9eab414D2ee740cF1d6d039E725"
+        }
+      ],
+      "cashoutPools": [
+        {
+          "currency0": "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18",
+          "currency1": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+          "fee": 8388608,
+          "tickSpacing": 8,
+          "hooks": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
+          "poolId": "0xcbdfea90430a30ee4469c9902e120a77e7c7e4711d5643671c1d1957f2f1ce27"
+        },
+        {
+          "poolAddress": "0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3",
+          "factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+          "currency0": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+          "currency1": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+          "fee": 500,
+          "tickSpacing": 10,
+          "hooks": "0x0000000000000000000000000000000000000000",
+          "poolId": "0x000000000000000000000000d4eb21209c4d6093f80b5b84f5c45cc093ea14a3"
+        },
+        {
+          "currency0": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+          "currency1": "0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725",
+          "fee": 0,
+          "tickSpacing": 200,
+          "hooks": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+          "poolId": "0xcde4d35e341901bc0308c2ffc789448ccd0f238a59597fe702e6710484b9c370"
+        },
+        {
+          "currency0": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+          "currency1": "0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725",
+          "fee": 7800,
+          "tickSpacing": 78,
+          "hooks": "0x0000000000000000000000000000000000000000",
+          "poolId": "0xa3318d6ff46aa685b3dcee29cb09211d19a53b142fe503f8ff572258fd4c5aad"
+        }
+      ],
+      "exitDesk": "0x0c7e23f245377551a7fac3b3d05238ac2e9eefc2",
+      "rolloverRouter": "0xB47D90C6af419353536E023Ae00D132c68226c40",
+      "loopRouter": "0xe5A69a1DEd8437bbFDe19263B626aAE4Ec1f09cf",
+      "putRouter": "0x93D6665D881a2DB7d054dBD271dF513dAa52ec99"
+    },
+    "HIMS": {
+      "lendAsset": {
+        "token": "0xCceE82fE024c36fA15E1005edE3E9e4787e23D09",
+        "decimals": 18
+      },
+      "factory": "0x76030f3fd8631a2839d79fefbf5eff124229734a",
+      "core": "0xc64c71f1a989e1830948d1adcb43a2b5f5a8dba1",
+      "reserve": "0x2677299eaa9dc7b0dd2aac972c63b20ffe2c87d8",
+      "quoteVerifier": "0x6260cd08d8ae6d635b58966ac3b2ecfa3e4dc2a7",
+      "fillRouter": "0x3c472d54d5c51cffa682e85a86f7562ff368e53d",
+      "gradeRegistry": "0x37ce0efc2013a5054be561b9ceeb1d25c4574ea1",
+      "feeProcessor": "0x53f952a05ac750aca7591dba2d386762efba637a",
+      "startBlock": 106250129,
+      "engine": {
+        "registry": "0xa077b4d108544efe90e9d6d1348c3e6c3e071bb1",
+        "rewards": "0x4BEa4A533Ef7463fc67565b9Ac96F7eE1AF93AE2",
+        "cashoutRouter": "0xf092da59586b0bbdf9eb9b9c68234887c83ed473",
+        "flashPool": "0xd10E6245961D697d975963682ECe9979E9917fBC",
+        "startBlock": 106249614
+      },
+      "collateral": [
+        {
+          "token": "0x98096d17e191B3dA1d5f99a6D7b3584351b11E18"
+        }
+      ],
+      "cashoutPools": [
+        {
+          "currency0": "0x98096d17e191b3da1d5f99a6d7b3584351b11e18",
+          "currency1": "0xccee82fe024c36fa15e1005ede3e9e4787e23d09",
+          "fee": 8388608,
+          "tickSpacing": 8,
+          "hooks": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
+          "poolId": "0x9c89b04303dfa76f3f6fb02c2b77be0e8a00ab8fa00d507119acd54ab3e8640d"
+        }
+      ],
+      "exitDesk": "0x0c7e23f245377551a7fac3b3d05238ac2e9eefc2",
+      "rolloverRouter": "0xa27F40174B6293252E0FDbCFf8c3B50868156EE0"
+    }
+  }
+}

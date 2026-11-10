@@ -1,0 +1,25 @@
+{
+  "_comment": "The commit each dependency is pinned at. script/libs.js checks them out.",
+  "libraries": [
+    {
+      "path": "lib/forge-std",
+      "url": "https://github.com/foundry-rs/forge-std",
+      "commit": "bf647bd6046f2f7da30d0c2bf435e5c76a780c1b"
+    },
+    {
+      "path": "lib/openzeppelin-contracts",
+      "url": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+      "commit": "cab19933c33c2ad1d4c7a84864a3601dddfd16f3"
+    },
+    {
+      "path": "lib/v4-periphery",
+      "url": "https://github.com/uniswap/v4-periphery",
+      "commit": "dce236d4e2057422d0791d9a973a58765eb46f65"
+    },
+    {
+      "path": "integrations/lender-amm/lib/uniswap-hooks",
+      "url": "https://github.com/OpenZeppelin/uniswap-hooks",
+      "commit": "b5f10574f943911635754dd76ed6ce95858b7d93"
+    }
+  ]
+}

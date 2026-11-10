@@ -1,0 +1,46 @@
+# gage's lender kit: Uniswap v4 hooks whose idle LP liquidity is lent through gage's rehypo sources.
+# A separate project, so OpenZeppelin's hooks stay out of gage's `src/` tree. Uniswap v4, OpenZeppelin
+# Contracts and forge-std are gage's own pins (`lib/` at the repository root), the versions gage's testnet v4 deployment was built
+# from; OpenZeppelin uniswap-hooks is pinned here (`lib/uniswap-hooks`, v1.3.0-rc.0, unaudited). Setup: README.md.
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+script = "script"
+libs = ["lib", "../../lib"]
+# v4-core's PoolManager is pinned to 0.8.26 and uniswap-hooks is built and tested with it: one compiler for all.
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+cbor_metadata = false
+auto_detect_remappings = false
+remappings = [
+    "@openzeppelin/uniswap-hooks/=lib/uniswap-hooks/",
+    "@openzeppelin/contracts/=../../lib/openzeppelin-contracts/contracts/",
+    "@uniswap/v4-core/=../../lib/v4-periphery/lib/v4-core/",
+    "@uniswap/v4-periphery/=../../lib/v4-periphery/",
+    "forge-std/=../../lib/forge-std/src/",
+    "solmate/=../../lib/v4-periphery/lib/v4-core/lib/solmate/",
+]
+fs_permissions = [
+    # The mainnet manifest, whose PoolManager and USDG the rehypo source's mainnet fork test checks its constants against.
+    { access = "read", path = "../../deployments/manifest/4663.json" },
+    { access = "read-write", path = "./deployments" },
+    # gage's rehypo source factory, built at the repository root, for the plug test with OpenZeppelin's own ERC-4626 hook.
+    { access = "read", path = "../../out/GageRehypoSourceFactory.sol" },
+    # The price router and the Nuntius-format feed behind it, built at the repository root.
+    { access = "read", path = "../../out/RehypoPriceRouter.sol" },
+    { access = "read", path = "../../out/NuntiusPriceSource.sol" },
+]
+
+[fuzz]
+runs = 256
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+number_underscore = "thousands"
