@@ -20,7 +20,7 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {MockGageVault} from "./mocks/MockGageVault.sol";
 import {FactoryRegistryStandIn} from "./RehypoSourcePlug.t.sol";
 import {SignedPriceStandIn} from "./RehypoSourcePricedPlug.t.sol";
-import {RehypoSourceSettings} from "../script/RehypoSource.s.sol";
+import {RehypoSource, RehypoSourceSettings} from "../script/RehypoSource.s.sol";
 import {AnchoredUnlockCheckedHook} from "../src/AnchoredUnlockCheckedHook.sol";
 import {KitBands} from "./utils/KitBands.sol";
 import {FeeModuleStandIn} from "./mocks/FeeModuleStandIn.sol";
@@ -70,8 +70,8 @@ interface IRepeatSource {
 /// every round. With the fair price at the anchor: every declared width from the full range to +-0.01%, at 1, 5 and 30
 /// bp fees, with the kit's layout (the float-only side at 100%) and balanced targets, on a stable pair and a priced
 /// one. With the fair price resting off the anchor anywhere inside the band, either way (a stable pair off parity, a
-/// priced pair's venue off the signed price): every declared width with equal float targets on both sides, the rule a
-/// declared range takes (docs/rehypo-source.md, item 6), at the same fees; the kit's layout there breaks the bound, its
+/// priced pair's venue off the signed price): every declared width with equal float targets on both sides, a declared
+/// range's default and a stable pair's rule (docs/rehypo-source.md, item 6), at the same fees; the kit's layout there breaks the bound, its
 /// deep side reopened at the anchor every pass. What the trader gains is what the LPs lose (asserted), valued at the
 /// fair price. The same rounds break the bound on a range that follows the price, and on the anchored range sized at
 /// each swap's price as OpenZeppelin's hook sizes it, which grows deeper toward an edge where one side stops binding
@@ -138,6 +138,8 @@ abstract contract RehypoRepeatBase is Test {
     uint256 internal backSteps = BACK_STEPS;
     /// @dev A keeper pass before each push too, so the push sizes the position afresh and may ask the failsafe.
     bool internal passBeforePush;
+    /// @dev token0 lends too, through a gage vault of its own, where it is otherwise float-only.
+    bool internal bothLent;
 
     address internal partner = makeAddr("partner");
     address internal keeper = makeAddr("keeper");
@@ -184,18 +186,23 @@ abstract contract RehypoRepeatBase is Test {
     // ---------------------------------------------------------------- the stack
 
     /// @dev The vault, a factory on a fresh registry, and both sources: token0 float-only at `floatOnlyBps` (or the lent
-    /// side's target), token1 lent at `lentBps`.
+    /// side's target), token1 lent at `lentBps`. With `bothLent`, token0 has a vault of its own.
     function _sources(Run memory r) internal {
         vault = new MockGageVault(IERC20(_token1()));
         FactoryRegistryStandIn registry = new FactoryRegistryStandIn();
         registry.record(address(vault));
+        address vault0;
+        if (bothLent) {
+            vault0 = address(new MockGageVault(IERC20(_token0())));
+            registry.record(vault0);
+        }
         IRepeatFactory f =
             IRepeatFactory(deployCode(FACTORY_ARTIFACT, abi.encode(address(pm), address(registry), _priceSource())));
         RehypoSourceSettings memory st = _settings(r.declared);
         uint16 floatOnly = r.floatOnlyBps == EQUAL ? lentBps : r.floatOnlyBps;
         vm.startPrank(partner);
         s0 = IRepeatSource(
-            f.create(IERC20(_token0()), address(0), partner, partner, floatOnly, st, failsafeBps, _peg(), "0")
+            f.create(IERC20(_token0()), vault0, partner, partner, floatOnly, st, failsafeBps, _peg(), "0")
         );
         s1 = IRepeatSource(
             f.create(IERC20(_token1()), address(vault), partner, partner, lentBps, st, failsafeBps, _peg(), "1")
@@ -371,7 +378,11 @@ abstract contract RehypoRepeatBase is Test {
     function _label(Run memory r) internal view returns (string memory) {
         return string.concat(
             r.declared == 0 ? "full range" : string.concat(vm.toString(r.declared), " ticks"),
-            r.floatOnlyBps == 10_000 ? ", kit layout, " : ", equal targets, ",
+            r.floatOnlyBps == 10_000
+                ? ", kit layout, "
+                : r.floatOnlyBps == EQUAL
+                    ? ", equal targets, "
+                    : string.concat(", other side at ", vm.toString(r.floatOnlyBps), " bps, "),
             vm.toString(lentBps / 100),
             "% float, ",
             vm.toString(r.fee / 100),
@@ -381,6 +392,7 @@ abstract contract RehypoRepeatBase is Test {
                 : "",
             failsafeBps == 0 ? "" : string.concat(", failsafe ", vm.toString(failsafeBps / 100), "%"),
             passBeforePush ? ", a pass before each push" : "",
+            bothLent ? ", both sides lent" : "",
             backSteps == BACK_STEPS ? "" : string.concat(", back in ", vm.toString(backSteps)),
             fairBps == 10_000 ? "" : string.concat(", fair at ", vm.toString(fairBps), " bps of the anchor")
         );
@@ -422,11 +434,27 @@ abstract contract RehypoRepeatBase is Test {
         fairBps = 10_000;
     }
 
+    /// @dev The property with the other side at its own float target `floatOnlyBps`, the fair price at the anchor and
+    /// resting `off` basis points either side of it, at each float target of the lent side and each fee.
+    function _holdsPerSide(uint24 declared, uint16 floatOnlyBps, uint256 off) internal {
+        uint256[3] memory fairs = [uint256(10_000), 10_000 + off, 10_000 - off];
+        for (uint256 j; j < fairs.length; ++j) {
+            fairBps = fairs[j];
+            _holds(declared, floatOnlyBps);
+        }
+        fairBps = 10_000;
+    }
+
     /// @dev The kit's layout with the fair price resting off the anchor, at 1 bp: the deep side, reopened at the anchor
     /// each pass, pays the mispricing every round, past the bound within a day.
     function _breaksOffAnchor(uint24 declared, uint256 fair) internal returns (int256 worst) {
+        return _offAnchor(declared, fair, 100);
+    }
+
+    /// @dev The same at `fee`.
+    function _offAnchor(uint24 declared, uint256 fair, uint24 fee) internal returns (int256 worst) {
         fairBps = fair;
-        Run memory r = Run(declared, 10_000, 100, 0, 0);
+        Run memory r = Run(declared, 10_000, fee, 0, 0);
         (worst,) = _rounds(r, ROUNDS);
         console2.log(
             string.concat(_label(r), ": worst cumulative LP loss (bps of the smaller edge) ", vm.toString(worst))
@@ -592,10 +620,27 @@ contract RehypoSourceRepeatStableTest is RehypoRepeatStablePair {
         _holdsOffAnchor(2, [uint256(9980), 9952]);
     }
 
+    function test_repeat_point5_bothSidesLent() public {
+        bothLent = true;
+        _holds(100, EQUAL);
+    }
+
+    /// @dev With frxUSD lent too, resting off parity either way.
+    function test_offParity_point5_bothSidesLent() public {
+        bothLent = true;
+        _holdsOffAnchor(100, [uint256(10_048), 9952]);
+    }
+
     /// @dev The kit's layout (the float-only side at 100%) on a +-0.1% range with frxUSD 0.48% above parity breaks the
-    /// bound within a day at 1 bp: why a declared range takes equal float targets.
+    /// bound within a day at 1 bp: why a stable pair takes equal float targets on a declared range.
     function test_offParity_kitLayoutBreaksTheProperty() public {
         assertGt(_breaksOffAnchor(20, 10_048), BAR, "the kit's layout off parity breaks the bound");
+    }
+
+    /// @dev The same layout and rest at a 5 bp fee breaks it too: on a range this much narrower than the rest off
+    /// parity, a higher fee does not close the leak.
+    function test_offParity_kitLayoutBreaksAtFiveBpToo() public {
+        assertGt(_offAnchor(20, 10_048, 500), BAR, "at 5 bp the kit's layout off parity still breaks the bound");
     }
 }
 
@@ -609,6 +654,11 @@ abstract contract RehypoRepeatPricedPair is RehypoRepeatBase {
 
     SignedPriceStandIn internal prices;
     uint160 internal par;
+    /// @dev The kit's set-up script, for the width at which a band's cap stops binding (`capFreeTicks`).
+    RehypoSource internal script = new RehypoSource();
+    /// @dev Both sources' band either side of the signed price, and the NVDA seeded beside 100,000 USDG.
+    uint16 internal bandBps = 100;
+    uint256 internal seedNvda = 555e18;
 
     function setUp() public virtual override {
         super.setUp();
@@ -631,21 +681,22 @@ abstract contract RehypoRepeatPricedPair is RehypoRepeatBase {
     }
 
     function _settings(uint24 declared) internal view override returns (RehypoSourceSettings memory) {
-        return RehypoSourceSettings(declared, address(prices), NVDA, 100, 500);
+        return RehypoSourceSettings(declared, address(prices), NVDA, bandBps, 500);
     }
 
-    /// @dev About $100,000 a side.
-    function _seed() internal pure override returns (uint256, uint256) {
-        return (555e18, 100_000e6);
+    /// @dev About $100,000 a side, unless a test seeds more NVDA.
+    function _seed() internal view override returns (uint256, uint256) {
+        return (seedNvda, 100_000e6);
     }
 
     function _centre() internal view override returns (uint160) {
         return par;
     }
 
-    /// @dev 0.95% off the centre, inside the +-1% band.
+    /// @dev 95% of the way to the band's edge, inside it: 0.95% off the centre on the +-1% band.
     function _edgePrice(bool below) internal view override returns (uint160) {
-        return uint160(Math.mulDiv(par, Math.sqrt(uint256(below ? 9905 : 10_095) * 1e14), 1e9));
+        uint256 off = uint256(bandBps) * 95;
+        return uint160(Math.mulDiv(par, Math.sqrt((below ? 1e6 - off : 1e6 + off) * 1e12), 1e9));
     }
 
     function _keeperPass() internal override {
@@ -767,8 +818,78 @@ contract RehypoSourceRepeatPricedTest is RehypoRepeatPricedPair {
         _holdsOffAnchor(2, [uint256(9980), 9905]);
     }
 
+    function test_repeat_onePct_bothSidesLent() public {
+        bothLent = true;
+        _holds(200, EQUAL);
+    }
+
+    /// @dev With NVDA lent too, the venue resting off the signed price either way.
+    function test_offCentre_onePct_bothSidesLent() public {
+        bothLent = true;
+        _holdsOffAnchor(200, [uint256(10_095), 9905]);
+    }
+
+    // ------------------------------------------------- a float target per side, where the cap leaves the float free
+
+    /// @dev A priced, unpegged pair may give its two sides different float targets where its declared range is at
+    /// least the width at which the source's cap inside the band stops binding for its band (`capFreeTicks`, the kit's
+    /// set-up script): there the property holds as it does with equal targets, the other side at 100% or at a
+    /// thirtieth, the fair price at the anchor and 90% of the way to the band's edge either way. Below that width it
+    /// breaks at the 1 bp fee, which is why gage warns of different targets on a narrower range.
+    function test_perSide_band25_otherSideWhole() public {
+        bandBps = 25;
+        _holdsPerSide(script.capFreeTicks(25), 10_000, 22);
+    }
+
+    function test_perSide_band25_otherSideThin() public {
+        bandBps = 25;
+        _holdsPerSide(script.capFreeTicks(25), 300, 22);
+    }
+
+    function test_perSide_band50_otherSideWhole() public {
+        bandBps = 50;
+        _holdsPerSide(script.capFreeTicks(50), 10_000, 45);
+    }
+
+    function test_perSide_band50_otherSideThin() public {
+        bandBps = 50;
+        _holdsPerSide(script.capFreeTicks(50), 300, 45);
+    }
+
+    function test_perSide_band100_otherSideWhole() public {
+        _holdsPerSide(script.capFreeTicks(100), 10_000, 90);
+    }
+
+    function test_perSide_band100_otherSideThin() public {
+        _holdsPerSide(script.capFreeTicks(100), 300, 90);
+    }
+
+    /// @dev A pool that holds nine times more NVDA than USDG, the NVDA side at a thirtieth: about the same dollars in
+    /// the pool on each side, as a stock or ETH pool is set.
+    function test_perSide_onAPoolOfMostlyTheOtherToken() public {
+        (bandBps, seedNvda) = (30, 5000e18);
+        _holdsPerSide(script.capFreeTicks(30), 340, 27);
+    }
+
+    /// @dev At a quarter of the width, 20% beside 100% at 1 bp with NVDA 0.45% above the signed price: past the bound.
+    function test_perSide_belowTheCapFreeWidthBreaksTheProperty() public {
+        bandBps = 50;
+        assertGt(
+            _breaksOffAnchor(script.capFreeTicks(50) / 4, 10_045),
+            BAR,
+            "different targets under the cap break the bound"
+        );
+    }
+
+    /// @dev The same range and rest at a 5 bp fee stays under the bound: here the range is wider than the rest off
+    /// the signed price, and the fee closes the leak.
+    function test_perSide_belowTheCapFreeWidthHoldsAtFiveBp() public {
+        bandBps = 50;
+        assertLt(_offAnchor(script.capFreeTicks(50) / 4, 10_045, 500), BAR, "at 5 bp different targets hold");
+    }
+
     /// @dev The kit's layout on a +-1% range with NVDA 0.2% above the signed price breaks the bound within a day at 1
-    /// bp: why a declared range takes equal float targets on a priced pair too.
+    /// bp: why equal float targets are the default on a priced pair too.
     function test_offCentre_kitLayoutBreaksTheProperty() public {
         assertGt(_breaksOffAnchor(200, 10_020), BAR, "the kit's layout off the signed price breaks the bound");
     }

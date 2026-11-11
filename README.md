@@ -1,6 +1,7 @@
 # gage rehypo: a preview for partners
 
-**A preview of work in progress.** Cut on 10 November 2026 for partners to read and to test on a fork. The contracts
+**A preview of work in progress.** Cut on 11 November 2026 (first cut: 10 November) for partners to read and to test on
+a fork. The contracts
 and hooks here are newer than anything deployed. They are **not deployed, not reviewed, and may change.**
 
 A rehypo pool is a Uniswap v4 pool whose idle liquidity is lent on gage. The pool's hook deposits each token into a
@@ -16,7 +17,7 @@ guides, and a note on everything that runs off-chain.
 | --- | --- | --- |
 | `src/rehypo/GageRehypoSource.sol`, `GageRehypoSourceFactory.sol` | The source and its factory: the float, the vault, declared ranges, priced and pegged sources, the failsafe, the draw for a source with no vault. | BUSL-1.1 ([LICENSE](LICENSE)) |
 | `src/rehypo/RehypoPriceRouter.sol`, `RehypoParPriceSource.sol`, `src/oneday/NuntiusPriceSource.sol` | Each token's price feed: a signed price, or one USDG for a dollar stable nobody signs a price for. | BUSL-1.1 |
-| `integrations/lender-amm/` | The hooks (`UnlockCheckedHook`, its failsafe, anchored and fee forms), the set-up script and the tests. Its [README](integrations/lender-amm/README.md) says what each file is. | MIT ([LICENSE-MIT](LICENSE-MIT)) |
+| `integrations/lender-amm/` | The hooks (`UnlockCheckedHook`, its failsafe, anchored and fee forms, and the standing hooks), the set-up script and the tests. Its [README](integrations/lender-amm/README.md) says what each file is. | MIT ([LICENSE-MIT](LICENSE-MIT)) |
 | `interfaces/` | What your hook, your Safe and your tools call: the source, its factory, a partner vault, the vault factory and its registry. | MIT |
 | `abi/` | The ABIs of the contracts in `src/`. | |
 | `deployments/manifest/4663.json` | The addresses on Robinhood Chain mainnet a rehypo pool touches: Uniswap v4, USDG, gage's vault factories and their registry. | |
@@ -24,6 +25,18 @@ guides, and a note on everything that runs off-chain.
 | [docs/offchain.md](docs/offchain.md) | Everything that runs off-chain: gage's keeper, prices, lending, the hook check, and your side. | |
 | `docs/integrate/` | Partner guides: [DEX partners](docs/integrate/dex-partners.md), [partner vaults](docs/integrate/partner-vaults.md), [fills](docs/integrate/fills.md), [the exit desk](docs/integrate/exit-desk.md), [generations](docs/integrate/generations.md). | |
 | [PARTNERS.md](PARTNERS.md) | The steps with gage, from a hook to a served pool. | |
+
+## New in the 11 November cut
+
+- **Standing hooks** (`StandingAnchoredHook` and three variants, in `integrations/lender-amm/src/`). The anchored hooks
+  add their position before every swap and remove it after. The standing hooks leave it in the pool between keeper
+  moves, so a swap on it calls no source: about 128,000 gas in the kit's tests, against about 586,000. The keeper's move
+  goes to the hook, which takes the position out and moves both sources; the first swap after a move places the
+  position again and pays for it (about 565,000 gas). The guide's "Standing hooks" section has the rules.
+- **A float target per side** on a priced pair that is not pegged: yours to set, with a warning where the range is
+  narrower than its band's cap-free width (the guide's checklist, item 6).
+- **A hook of your own design** on a declared range is served, with a warning that gage has not reviewed it
+  ([docs/offchain.md](docs/offchain.md), "The hook check").
 
 ## Run it
 
@@ -79,7 +92,8 @@ LENDER_AMM_MAINNET_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test -
 Deploy it where the fork test deploys the kit's (`deployCodeTo` in `setUp`), with the two sources as its yield sources.
 What a hook on a declared range must do, in short (the guide's checklist has the rest):
 
-1. Use the range the sources declare, held on their anchor between keeper moves.
+1. Use the range the sources declare, held on their anchor between keeper moves. The anchored hooks add it at each
+   swap; the standing hooks leave it in the pool.
 2. Size its liquidity from what both sources offer (`maxWithdraw`).
 3. Refuse LP deposits and withdrawals while the PoolManager is unlocked.
 4. Give LPs an ERC-20 share.

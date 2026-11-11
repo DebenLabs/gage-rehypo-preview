@@ -5,7 +5,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 /// @notice A rehypo source: an ERC-4626 vault per pool token that a partner's hook deposits into. Generated from its build.
-/// @dev Generated from the build of `src/rehypo/GageRehypoSource.sol` at d4e82b3be288.
+/// @dev Generated from the build of `src/rehypo/GageRehypoSource.sol` at 7a04313b1096.
 interface IGageRehypoSource {
     struct RehypoSourceSettings {
         uint24 rangeTicks;

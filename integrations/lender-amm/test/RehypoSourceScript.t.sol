@@ -21,6 +21,9 @@ import {
 import {SignedPriceStandIn} from "./RehypoSourcePricedPlug.t.sol";
 import {StablePriceStandIn} from "./RehypoSourceRepeat.t.sol";
 import {FailsafeUnlockCheckedHook} from "../src/FailsafeUnlockCheckedHook.sol";
+import {StandingPosition} from "../src/StandingAnchoredHook.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {UnlockCheckedHook} from "../src/UnlockCheckedHook.sol";
 import {FactoryRegistryStandIn} from "./RehypoSourcePlug.t.sol";
 import {MockGageVault} from "./mocks/MockGageVault.sol";
 import {FeeModuleStandIn} from "./mocks/FeeModuleStandIn.sol";
@@ -49,6 +52,12 @@ contract RehypoSourceScriptTest is Test, Deployers {
     uint160 internal constant PAR = uint160(uint256(1 << 96) / 1e6);
     uint256 internal constant SEED_FRX = 100_000e18;
     uint256 internal constant SEED_USDG = 100_000e6;
+    /// @dev What the set-up says of a priced, unpegged pool's two float targets on a range too narrow for its band.
+    string internal constant FLOATS_WARNING =
+        "the two float targets differ on a range under the width at which its band's cap stops binding: a price resting off the anchor can drain the deeper side at every keeper pass (docs/rehypo-source.md, item 6)";
+    /// @dev The set-up's refusal of two float targets that differ on a stable or a pegged pool.
+    string internal constant FLOATS_REFUSED =
+        "a stable or pegged pool takes equal float targets on a declared range (docs/rehypo-source.md, item 6)";
 
     MockERC20 internal frx;
     MockERC20 internal usdg;
@@ -78,6 +87,8 @@ contract RehypoSourceScriptTest is Test, Deployers {
             vault: address(usdgVault),
             floatBps: 2000,
             floatOnly: IERC20(address(frx)),
+            floatVault: address(0),
+            floatOnlyBps: 0,
             keeper: keeper,
             seedLend: SEED_USDG,
             seedFloat: SEED_FRX,
@@ -324,6 +335,148 @@ contract RehypoSourceScriptTest is Test, Deployers {
         script.setUpPool(pool);
     }
 
+    // ------------------------------------------------ both sides lent
+
+    function _frxVault() internal returns (MockGageVault frxVault) {
+        frxVault = new MockGageVault(IERC20(address(frx)));
+        registry.record(address(frxVault));
+    }
+
+    /// @dev With a vault of its own (`floatVault`) the other side lends too: its source takes that vault and the lent
+    /// side's float target, on the full range as well, and the keeper's pass lends the rest of both sides.
+    function test_theOtherSideLendsThroughAVaultOfItsOwn() public {
+        MockGageVault frxVault = _frxVault();
+        RehypoSource.Pool memory pool = _pool(_factory());
+        pool.floatVault = address(frxVault);
+        RehypoSource.Plugged memory p = script.setUpPool(pool);
+        assertEq(p.lendSource.vault(), address(usdgVault));
+        assertEq(p.floatSource.vault(), address(frxVault), "the other side's source lends through its own vault");
+        assertEq(p.floatSource.floatBps(), 2000, "a side that lends takes the float target, on the full range too");
+
+        vm.startPrank(keeper);
+        p.lendSource.rebalance(MIN_BAND, MAX_BAND);
+        p.floatSource.rebalance(MIN_BAND, MAX_BAND);
+        vm.stopPrank();
+        assertEq(usdgVault.cash(), SEED_USDG * 4 / 5, "80% of the USDG lent");
+        assertEq(frxVault.cash(), SEED_FRX * 4 / 5, "and 80% of the frxUSD");
+
+        frx.approve(address(swapRouter), type(uint256).max);
+        usdg.approve(address(swapRouter), type(uint256).max);
+        uint256 usdgBefore = usdg.balanceOf(address(this));
+        swap(p.key, true, -1000e18, ZERO_BYTES);
+        assertGt(usdg.balanceOf(address(this)) - usdgBefore, 900e6, "a 1,000 frxUSD sale against a 20,000 USDG float");
+        uint256 frxBefore = frx.balanceOf(address(this));
+        swap(p.key, false, -500e6, ZERO_BYTES);
+        assertGt(frx.balanceOf(address(this)) - frxBefore, 490e18, "and 500 USDG against a 20,000 frxUSD float");
+    }
+
+    /// @dev A side that lends carries the pool's failsafe on the full range too: it has a vault to draw on. A float-only
+    /// side there has none, its whole float being open already.
+    function test_onTheFullRangeASideThatLendsCarriesTheFailsafe() public {
+        MockGageVault frxVault = _frxVault();
+        RehypoSource.Pool memory pool = _pool(_factory());
+        pool.failsafeBps = 1000;
+        RehypoSource.Plugged memory floatOnly = script.setUpPool(pool);
+        assertEq(floatOnly.floatSource.FAILSAFE_BPS(), 0, "float-only: none");
+
+        pool.floatVault = address(frxVault);
+        pool.salt = "both lent";
+        pool.vault = address(new MockGageVault(IERC20(address(usdg))));
+        registry.record(pool.vault);
+        RehypoSource.Plugged memory p = script.setUpPool(pool);
+        assertEq(p.lendSource.FAILSAFE_BPS(), 1000);
+        assertEq(p.floatSource.FAILSAFE_BPS(), 1000, "the other side draws on its own vault");
+    }
+
+    /// @dev On a declared range the two sides still take equal float targets (item 6), each side's rest in its own
+    /// vault after the keeper's pass.
+    function test_aDeclaredPoolLendsBothSidesAtEqualFloatTargets() public {
+        MockGageVault frxVault = _frxVault();
+        RehypoSource.Pool memory pool = _pool(_factory());
+        pool.settings.rangeTicks = 20;
+        pool.floatVault = address(frxVault);
+        RehypoSource.Plugged memory p = script.setUpPool(pool);
+        assertEq(p.floatSource.vault(), address(frxVault));
+        assertEq(p.lendSource.floatBps(), 2000);
+        assertEq(p.floatSource.floatBps(), 2000, "equal float targets");
+        assertGt(p.lendSource.swapCap(), 0, "the first move was made on both sources");
+        assertGt(p.floatSource.swapCap(), 0);
+
+        vm.startPrank(keeper);
+        p.lendSource.rebalance(MIN_BAND, MAX_BAND);
+        p.floatSource.rebalance(MIN_BAND, MAX_BAND);
+        vm.stopPrank();
+        assertApproxEqRel(usdgVault.cash(), SEED_USDG * 4 / 5, 0.001e18, "80% of the USDG lent");
+        assertApproxEqRel(frxVault.cash(), SEED_FRX * 4 / 5, 0.001e18, "and 80% of the frxUSD");
+    }
+
+    // ------------------------------------------------ a float target per side
+
+    function _pricedPool(uint24 rangeTicks, uint16 bandBps) internal returns (RehypoSource.Pool memory pool) {
+        SignedPriceStandIn prices = new SignedPriceStandIn(address(usdg));
+        pool = _pool(IGageRehypoSourceFactory(script.deployFactory(manager, address(registry), address(prices))));
+        pool.settings = RehypoSourceSettings(rangeTicks, address(prices), address(frx), bandBps, 500);
+        pool.price8 = 18_758_137_450;
+    }
+
+    /// @dev The width at which a band's cap stops binding, as `GageRehypoSource._inBandCap` counts it: no range does
+    /// it for the widest band.
+    function test_theCapFreeWidthOfABand() public view {
+        assertEq(script.capFreeTicks(10), 71);
+        assertEq(script.capFreeTicks(25), 421);
+        assertEq(script.capFreeTicks(30), 605);
+        assertEq(script.capFreeTicks(35), 824);
+        assertEq(script.capFreeTicks(50), 1702);
+        assertEq(script.capFreeTicks(300), type(uint24).max);
+    }
+
+    /// @dev A priced, unpegged pool whose range leaves the cap free takes a float target per side (`floatOnlyBps`).
+    function test_aPricedPoolTakesAFloatTargetPerSideWhereTheCapIsFree() public {
+        RehypoSource.Pool memory pool = _pricedPool(421, 25);
+        pool.floatOnlyBps = 340;
+        pool.salt = "per side";
+        RehypoSource.Plugged memory p = script.setUpPool(pool);
+        assertEq(p.lendSource.floatBps(), 2000);
+        assertEq(p.floatSource.floatBps(), 340, "the other side's own target");
+        assertEq(p.floatSource.RANGE_TICKS(), 421);
+    }
+
+    /// @dev One tick narrower the cap binds: the set-up still goes, and says what different targets risk there.
+    function test_aPricedPoolIsWarnedOfAFloatTargetPerSideWhereTheCapBinds() public {
+        RehypoSource.Pool memory pool = _pricedPool(421, 25);
+        pool.floatOnlyBps = 340;
+        assertEq(script.floatTargetsWarning(pool), "", "none at the cap-free width");
+        pool = _pricedPool(420, 25);
+        pool.floatOnlyBps = 340;
+        pool.salt = "cap binds";
+        assertEq(script.floatTargetsWarning(pool), FLOATS_WARNING);
+        RehypoSource.Plugged memory p = script.setUpPool(pool);
+        assertEq(p.floatSource.floatBps(), 340, "the partner's choice");
+        pool.floatOnlyBps = 2000;
+        assertEq(script.floatTargetsWarning(pool), "", "none with equal targets");
+    }
+
+    /// @dev A stable pool on a declared range takes equal float targets, and so does a pegged one; on the full range
+    /// the other side's target is the partner's.
+    function test_aFloatTargetPerSideIsRefusedOnAStableOrPeggedRange() public {
+        RehypoSource.Pool memory pool = _pool(_factory());
+        pool.settings.rangeTicks = 2000;
+        pool.floatOnlyBps = 500;
+        vm.expectRevert(bytes(FLOATS_REFUSED));
+        script.setUpPool(pool);
+        assertEq(script.floatTargetsWarning(pool), "", "refused, so nothing more to say");
+        pool.floatOnlyBps = 2000;
+        RehypoSource.Plugged memory p = script.setUpPool(pool);
+        assertEq(p.floatSource.floatBps(), 2000, "equal float targets");
+
+        pool = _pricedPool(421, 25);
+        pool.pegBps = 50;
+        pool.price8 = 1e8;
+        pool.floatOnlyBps = 340;
+        vm.expectRevert(bytes(FLOATS_REFUSED));
+        script.setUpPool(pool);
+    }
+
     // ------------------------------------------------ a declared range (docs/rehypo-source.md, item 6)
 
     /// @dev Sources declaring a range take equal float targets: the float-only side the lent side's, so neither side is
@@ -439,11 +592,166 @@ contract RehypoSourceScriptTest is Test, Deployers {
         _refuses("FAILSAFE_BPS", "65536", "FAILSAFE_BPS must be from 0 to 1000", false);
         _refuses("FAILSAFE_BPS", "1001", "FAILSAFE_BPS must be from 0 to 1000", true);
         vm.setEnv("FAILSAFE_BPS", "0");
+        _refuses("FLOAT_FLOAT_BPS", "10001", "FLOAT_FLOAT_BPS must be from 0 to 10000", false);
+        _refuses("FLOAT_FLOAT_BPS", "65636", "FLOAT_FLOAT_BPS must be from 0 to 10000", true);
+        vm.setEnv("FLOAT_FLOAT_BPS", "0");
         _refuses("PRICED_BAND_BPS", "65636", "PRICED_BAND_BPS must be from 10 to 300", true);
         _refuses("PRICED_BAND_BPS", "9", "PRICED_BAND_BPS must be from 10 to 300", true);
         vm.setEnv("PRICED_BAND_BPS", "100");
         _refuses("PRICED_MOVE_BPS", "0", "PRICED_MOVE_BPS must be from 1 to 1000", true);
         _refuses("PRICED_MOVE_BPS", "66536", "PRICED_MOVE_BPS must be from 1 to 1000", true);
+
+        // In the same test, so no other one reads these variables meanwhile: the rehearsal takes the other side's vault
+        // from `FLOAT_VAULT`.
+        MockGageVault frxVault = _frxVault();
+        vm.setEnv("REHYPO_FACTORY", vm.toString(address(_factory())));
+        vm.setEnv("LEND_TOKEN", vm.toString(address(usdg)));
+        vm.setEnv("LEND_VAULT", vm.toString(address(usdgVault)));
+        vm.setEnv("FLOAT_TOKEN", vm.toString(address(frx)));
+        vm.setEnv("FLOAT_VAULT", vm.toString(address(frxVault)));
+        vm.setEnv("KEEPER", vm.toString(keeper));
+        vm.setEnv("SEED_LEND", vm.toString(SEED_USDG));
+        vm.setEnv("SEED_FLOAT", vm.toString(SEED_FRX));
+        RehypoSource.Plugged memory p = script.rehearse();
+        assertEq(p.floatSource.vault(), address(frxVault), "FLOAT_VAULT is the other side's vault");
+        assertEq(p.lendSource.vault(), address(usdgVault));
+
+        // And `STANDING` stands the pool up on a standing hook: here a pegged one, its hook the sources' only keeper.
+        StablePriceStandIn prices = new StablePriceStandIn(address(usdg));
+        vm.setEnv("REHYPO_FACTORY", vm.toString(script.deployFactory(manager, address(registry), address(prices))));
+        vm.setEnv("PRICE_SOURCE", vm.toString(address(prices)));
+        vm.setEnv("PRICE_8", "100000000");
+        vm.setEnv("FLOAT_VAULT", vm.toString(address(0)));
+        vm.setEnv("RANGE_TICKS", "20");
+        vm.setEnv("REHYPO_SALT", vm.toString(bytes32("standing")));
+        vm.setEnv("STANDING", "true");
+        p = script.rehearsePegged();
+        vm.setEnv("STANDING", "false");
+        assertEq(uint160(address(p.hook)) & Hooks.ALL_HOOK_MASK, STANDING_FLAGS, "the standing hook's flags");
+        assertTrue(p.lendSource.isKeeper(address(p.hook)) && !p.lendSource.isKeeper(keeper));
+        assertTrue(StandingPosition(payable(address(p.hook))).isKeeper(keeper));
+    }
+
+    // ------------------------------------------------ a standing hook
+
+    uint160 internal constant STANDING_FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            | Hooks.BEFORE_SWAP_FLAG
+    );
+    string internal constant STANDING_REFUSED =
+        "a standing hook is for a pegged pool, or a priced one whose range is at least the width at which its band's cap stops binding";
+
+    function _peggedPool() internal returns (RehypoSource.Pool memory pool, StablePriceStandIn prices) {
+        prices = new StablePriceStandIn(address(usdg));
+        pool = _pool(IGageRehypoSourceFactory(script.deployFactory(manager, address(registry), address(prices))));
+        pool.settings = RehypoSourceSettings(20, address(prices), address(frx), 50, 100);
+        pool.floatBps = 1000;
+        pool.pegBps = 50;
+    }
+
+    function _standing(RehypoSource.Plugged memory p) internal pure returns (StandingPosition) {
+        return StandingPosition(payable(address(p.hook)));
+    }
+
+    /// @dev The set-up on a standing hook, in the guide's order: the hook at an address with no `afterSwap` flag, the
+    /// hook the only keeper named on both sources, gage's keeper named on the hook, the whole seed in, and nothing in
+    /// the pool until the first swap after the keeper's first move, which places the position on the anchored range.
+    function test_aStandingPoolIsSetUpWithTheHookAsItsSourcesKeeper() public {
+        (RehypoSource.Pool memory pool, StablePriceStandIn prices) = _peggedPool();
+        prices;
+        RehypoSource.Plugged memory p = script.setUpStandingPool(pool);
+        StandingPosition hook = _standing(p);
+        assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, STANDING_FLAGS, "no afterSwap flag");
+        assertFalse(hook.getHookPermissions().afterSwap);
+        assertTrue(p.lendSource.isKeeper(address(hook)), "the hook keeps the lent source");
+        assertTrue(p.floatSource.isKeeper(address(hook)), "and the float-only one");
+        assertFalse(p.lendSource.isKeeper(keeper), "gage's keeper is named on neither source");
+        assertFalse(p.floatSource.isKeeper(keeper));
+        assertFalse(p.lendSource.isKeeper(address(this)), "nor is the partner left a keeper");
+        assertTrue(hook.isKeeper(keeper), "gage's keeper is the hook's");
+        assertEq(p.lendSource.depositor(), address(hook));
+        assertEq(hook.balanceOf(address(this)), Math.sqrt(SEED_FRX * SEED_USDG), "the whole seed in one deposit");
+        (uint128 liquidity,,) = hook.position();
+        assertEq(liquidity, 0, "nothing in the pool before the keeper's first move");
+
+        vm.prank(keeper);
+        hook.rebalanceAt(abi.encode(uint256(1e8), block.timestamp));
+        (liquidity,,) = hook.position();
+        assertEq(liquidity, 0, "the keeper's move places nothing");
+        assertEq(hook.getTickUpper() - hook.getTickLower(), 20, "the next swap places the anchored range");
+        // The keeper's file lists both sides, neither with a band: a pegged pool centres on its signed price.
+        assertEq(
+            script.keeperFile(p),
+            string.concat(
+                '{ "schemaVersion": 1, "chainId": 31337, "sources": [ { "name": "frxUSD/USDG, USDG side", "source": "',
+                vm.toString(address(p.lendSource)),
+                '" }, { "name": "frxUSD/USDG, frxUSD side", "source": "',
+                vm.toString(address(p.floatSource)),
+                '" } ] }'
+            )
+        );
+    }
+
+    /// @dev With the failsafe the standing failsafe hook, with a fee rule the standing fee hooks, each with what the
+    /// anchored ones take.
+    function test_aStandingPoolTakesTheFailsafeAndAFeeRule() public {
+        (RehypoSource.Pool memory pool,) = _peggedPool();
+        pool.failsafeBps = 1000;
+        RehypoSource.Plugged memory p = script.setUpStandingPool(pool);
+        FailsafeUnlockCheckedHook draws = FailsafeUnlockCheckedHook(payable(address(p.hook)));
+        assertEq(draws.MIN_DRAW_FEE_0(), 1e17, "ten cents of frxUSD");
+        assertEq(draws.MIN_DRAW_FEE_1(), 1e5, "ten cents of USDG");
+        assertEq(draws.FORGONE_PIPS(), 10);
+        assertEq(p.lendSource.FAILSAFE_BPS(), 1000);
+        assertEq(uint160(address(p.hook)) & Hooks.ALL_HOOK_MASK, STANDING_FLAGS);
+
+        FeeModuleStandIn module = new FeeModuleStandIn();
+        bytes32 venuePool = keccak256("the venue's pool");
+        module.set(venuePool, 500, 3000);
+        for (uint16 failsafe; failsafe <= 1000; failsafe += 1000) {
+            (pool,) = _peggedPool();
+            pool.failsafeBps = failsafe;
+            pool.salt = failsafe == 0 ? bytes32("fee") : bytes32("fee failsafe");
+            p = script.setUpStandingPool(
+                pool, RehypoSource.FeeRule(address(module), PoolId.wrap(venuePool), 100, 10_000)
+            );
+            assertTrue(LPFeeLibrary.isDynamicFee(p.key.fee), "a dynamic-fee pool");
+            assertEq(uint160(address(p.hook)) & Hooks.ALL_HOOK_MASK, STANDING_FLAGS);
+            IFeeHookRule rule = IFeeHookRule(address(p.hook));
+            assertEq(rule.swapFee(true), 500);
+            assertEq(rule.swapFee(false), 3000);
+            assertEq(rule.FEE_MODULE(), address(module));
+            assertTrue(_standing(p).isKeeper(keeper));
+        }
+    }
+
+    /// @dev A priced pool at the cap-free width of its band, with a float target per side.
+    function test_aStandingPricedPoolAtTheCapFreeWidthKeepsItsFloatPerSide() public {
+        RehypoSource.Pool memory pool = _pricedPool(605, 30);
+        pool.floatOnlyBps = 340;
+        pool.salt = "standing priced";
+        RehypoSource.Plugged memory p = script.setUpStandingPool(pool);
+        assertEq(p.lendSource.floatBps(), 2000);
+        assertEq(p.floatSource.floatBps(), 340, "the other side's own target");
+        assertTrue(p.floatSource.isKeeper(address(p.hook)) && _standing(p).isKeeper(keeper));
+    }
+
+    /// @dev A standing hook is set up only where the repeat rounds hold it: a pegged pool, or a priced one whose
+    /// range leaves its cap free. A stable declared range, a priced one a tick narrower and the full range are refused.
+    function test_aStandingPoolIsRefusedWhereItIsNotProven() public {
+        RehypoSource.Pool memory pool = _pool(_factory());
+        pool.settings.rangeTicks = 20;
+        vm.expectRevert(bytes(STANDING_REFUSED));
+        script.setUpStandingPool(pool);
+        pool.settings.rangeTicks = 0;
+        vm.expectRevert(bytes(STANDING_REFUSED));
+        script.setUpStandingPool(pool);
+        pool = _pricedPool(604, 30);
+        vm.expectRevert(bytes(STANDING_REFUSED));
+        script.setUpStandingPool(pool);
+        // The anchored set-up of the same pools is untouched.
+        UnlockCheckedHook anchored = script.setUpPool(pool).hook;
+        assertEq(uint160(address(anchored)) & Hooks.ALL_HOOK_MASK, STANDING_FLAGS | Hooks.AFTER_SWAP_FLAG);
     }
 
     function _refuses(string memory name, string memory value, string memory message, bool priced) internal {

@@ -14,7 +14,7 @@ says what each part does, what it can and cannot do to your pool, and what happe
 | The stablecoin watch | gage | Being added: it watches each stable's price, its issuer and, where it has one, its redemption reserve, and holds gage's quotes in a coin that fails a check. | Touch a pool. It decides only what gage's own services do. |
 | Loan pricing and plans | gage | Prices each loan request and signs the plan that says which vaults fund it. | Lend outside a vault's mandate: the vault checks every plan on-chain. |
 | The filler | gage | Sends the signed fills, settles loans at their end, recovers collateral after a default and keeps a vault's free cash in its reserve. | Lend without a signed plan, or delay a repayment: settling is open to anyone. |
-| The hook check | gage | Before gage serves a pool, it compares the hook's code with the builds it has reviewed. | Stop swaps or exits on a pool it does not serve. |
+| The hook check | gage | Before gage serves a pool, it compares the hook's code with the builds it has reviewed, and warns of one it has not. | Stop swaps or exits on a pool it does not serve. |
 | The indexer | gage | Follows the factory and every source it creates, for a pool page and for gage's own monitoring. | |
 | The sources' owner | You (a Safe) | Creates and binds the sources, names gage's keeper, sets the float target and the beneficiary. | |
 | Your fee contract | You | Quotes each swap's fee to the fee hooks. | Charge outside the floor and cap the hook was deployed with. |
@@ -30,6 +30,7 @@ It passes over every source every 5 minutes. A pass reads; it sends a transactio
 | --- | --- |
 | `rebalance(min, max)` on a stable source with no price | The float is away from its target, swaps are narrower than they should be, or a draw has spent the failsafe's room. The band is gage's for the pool: 0.5% either side of one for one. |
 | `rebalanceAt(report)` on a priced or pegged source | The same, or the centre has to move. The report is the token's signed price, or empty where its feed is the par feed. The keeper reads `valueOf` on the price source first and sends nothing the source would refuse. |
+| The same move on a standing hook | Sent to the hook, once for both sources, never to a source: the hook takes its position out of the pool and passes the call to both. The keeper counts what the position holds (`positionAmounts()`) in each side's float when it decides. It places nothing: the first swap after the move does. |
 | `endExit()` | The first pass a minute after an exit's hour has run (`exitHeldUntil`). |
 | `claimPockets`, `claimRewards` | Once a day each. A pocket claim restarts the day over which its proceeds join the float. |
 | `forward(token)` | Every pass, when the source holds sGAGE or recovered collateral. It goes to your beneficiary. |
@@ -104,14 +105,20 @@ lists the next holding when one ends unsold. The keeper ends the exit an hour af
 
 ## The hook check
 
-gage serves a pool on a declared range only when its hook is a build gage has reviewed.
+Before gage serves a pool on a declared range, it reads the pool's hook.
 
 - gage's keeper, the tool that prepares a pool's listing and the SDK's exit path each read the hook's runtime code,
-  set its immutables aside and compare the rest with the reviewed builds of the kit's anchored hooks.
-- They also read the immutables (the two sources, the fee bounds, the fee contract) and check that both sources take
-  the same float target.
-- A hook of your own design is reviewed first, and its build is then added to the record. Any change to it is a new
-  build and a new review.
+  set its immutables aside and compare the rest with the reviewed builds of the kit's anchored and standing hooks.
+- **A kit hook** is held to its immutables as the kit's constructor writes them for the pool (the two sources, the
+  range, the fee bounds, the fee contract), over two gage sources bound to it.
+- **A standing hook** is also held to its keepers: the hook is a keeper of both its sources, and gage's keeper is named
+  on the hook and on neither source. gage cannot list a source's other keepers, so naming none is yours to hold.
+- **A hook of your own design** is served too, with a warning that gage has not reviewed it. It is held to what the
+  chain shows: the two sources it names are gage sources bound to it. The sources' caps assume the range the guide
+  describes; on a hook that sizes or moves its range another way they do not bound what a push and a trade back take,
+  and that review is yours.
+- **Float targets.** A stable or pegged pair takes the same target on both sides. On a priced pair that is not pegged
+  they are yours to set, with a warning where the range is narrower than its band's cap-free width.
 - A pool that fails is not served: no keeper moves. Its swaps and exits are untouched.
 
 What gage needs from you for it: the hook's source and build settings, the pool key and both sources' addresses.
@@ -122,12 +129,14 @@ What gage needs from you for it: the hook's source and build settings, the pool 
   `SourceSettings`, `SourceFailsafe`, `Rebalanced`, `BandSet`, `Centred`, `VaultDrawn`, `PocketsClaimed`,
   `RewardsClaimed`, `Forwarded`, `ExitRequested`.
 - **gage's indexer** follows them and serves each source's state and history to a pool page.
-- **The SDK** (`gage-sdk` on npm) prepares an LP's exit from a source, the exit desk included.
+- **The SDK** (`gage-sdk` on npm) prepares an LP's exit from a source, the exit desk included. On a standing hook it
+  will take the position out first (`takeOut()`), so the source counts it; that is not in a release yet.
 
 ## Your side
 
 - **The Safe that owns the sources.** One batch per pool: create the two sources, deploy the hook, initialise the pool,
-  bind each source, seed, and name gage's keeper. Afterwards it sets the float target (a raise applies at once, a
+  bind each source, seed, and name gage's keeper (on a standing hook: name the hook on both sources, and gage's keeper
+  on the hook). Afterwards it sets the float target (a raise applies at once, a
   cut after 3 hours), the beneficiary, and a vault for a side that starts with none (after 3 days' notice).
 - **Your vaults.** A partner vault is created on gage's factory by whoever will curate it, and its curator, longest
   term and fee are fixed at creation. The curator can pause it and tighten its limits at once; loosening waits 3 hours.

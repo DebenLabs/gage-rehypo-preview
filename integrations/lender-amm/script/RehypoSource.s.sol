@@ -17,6 +17,8 @@ import {UnlockCheckedHook} from "../src/UnlockCheckedHook.sol";
 import {FailsafeUnlockCheckedHook} from "../src/FailsafeUnlockCheckedHook.sol";
 import {AnchoredUnlockCheckedHook, AnchoredFailsafeUnlockCheckedHook} from "../src/AnchoredUnlockCheckedHook.sol";
 import {AnchoredFeeHook, AnchoredFailsafeFeeHook} from "../src/AnchoredFeeHook.sol";
+import {StandingPosition, StandingAnchoredHook, StandingAnchoredFailsafeHook} from "../src/StandingAnchoredHook.sol";
+import {StandingAnchoredFeeHook, StandingAnchoredFailsafeFeeHook} from "../src/StandingFeeHook.sol";
 
 /// @notice What a source fixes at creation beyond its float target (`GageRehypoSourceSettings`, the next generation of
 /// 8 November 2026): the narrowest range the hook commits to (zero for the full range) and, for a priced X/USDG pool,
@@ -150,6 +152,12 @@ contract RehypoSource is Script {
         Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
             | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
     );
+    /// @dev A standing hook's permissions: the reference hook's less `afterSwap` (its position stays in the pool, so
+    /// nothing follows a swap).
+    uint160 internal constant STANDING_HOOK_FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            | Hooks.BEFORE_SWAP_FLAG
+    );
     /// @dev A stable pair's pool: 0.01%, every tick. A static fee, unless the pool takes a fee rule (`FeeRule`), when it
     /// is a dynamic-fee pool and the kit's fee hook names each swap's fee.
     uint24 internal constant FEE = 100;
@@ -193,8 +201,14 @@ contract RehypoSource is Script {
     uint256 internal constant FIRST_SEED_SHARE = 100;
     /// @dev OpenZeppelin's smallest seed, in shares (`100 * 10 ** _decimalsOffset()`).
     uint256 internal constant MIN_SEED_SHARES = 1e8;
+    /// @dev The source's own constants its cap inside the band is made of (`GageRehypoSource.CONCENTRATION_TICKS`,
+    /// `PAST_BAND_BPS`, and `_inBandCap`'s sixteenth).
+    uint256 internal constant CONCENTRATION_TICKS = 40_003;
+    uint256 internal constant PAST_BAND_BPS = 100;
+    uint256 internal constant CAP_ROUND = 16;
 
-    /// @notice A pool's two sides: one lent through a gage vault, one float-only.
+    /// @notice A pool's two sides: one lent through a gage vault, the other float-only or, with a vault of its own
+    /// (`floatVault`), lent too.
     struct Pool {
         IGageRehypoSourceFactory factory;
         /// @dev The lent side (USDG), its gage partner vault (from a factory the generation deployer recorded) and its
@@ -206,6 +220,15 @@ contract RehypoSource is Script {
         /// @dev The float-only side (frxUSD on day one): all its backing as float on the full range, the lent side's
         /// target on a declared range.
         IERC20 floatOnly;
+        /// @dev A gage partner vault of that token (from a factory the generation deployer recorded) when its side lends
+        /// too; zero for float-only. A side that lends takes the lent side's float target and the pool's failsafe on
+        /// the full range as well: equal float targets stay the default (docs/rehypo-source.md, item 6).
+        address floatVault;
+        /// @dev That side's own float target, or zero for the lent side's (all of it while float-only on the full
+        /// range). On a declared range a stable or pegged pool takes equal targets; on a priced, unpegged one it is
+        /// the partner's choice, and the set-up warns of one that differs on a range too narrow for its band
+        /// (`floatTargetsWarning`; docs/rehypo-source.md, item 6).
+        uint16 floatOnlyBps;
         address keeper;
         /// @dev The seed, in raw units of each token.
         uint256 seedLend;
@@ -238,9 +261,14 @@ contract RehypoSource is Script {
         uint24 cap;
     }
 
+    /// @dev Set for the length of `setUpStandingPool`: the set-up then deploys a standing hook and names keepers as it
+    /// needs them.
+    bool internal _standing;
+
     /// @notice What the set-up leaves: the two sources, the hook (a `FailsafeUnlockCheckedHook` when the lent source has
     /// the failsafe; its anchored form, `AnchoredUnlockCheckedHook` or `AnchoredFailsafeUnlockCheckedHook`, when both
-    /// sources declare a range; `AnchoredFeeHook` or `AnchoredFailsafeFeeHook` with a fee rule) and its pool.
+    /// sources declare a range; `AnchoredFeeHook` or `AnchoredFailsafeFeeHook` with a fee rule; from
+    /// `setUpStandingPool`, the standing hook of the same kind) and its pool.
     struct Plugged {
         IGageRehypoSource lendSource;
         IGageRehypoSource floatSource;
@@ -285,7 +313,12 @@ contract RehypoSource is Script {
     /// (raw units), and optionally `LEND_FLOAT_BPS` (default 2000, from 100 to 10,000), `RANGE_TICKS` (default 0, the
     /// full range; up to 1,774,544; non-zero, the hook this script deploys anchors a range that wide on parity and both
     /// sides take `LEND_FLOAT_BPS`), `FAILSAFE_BPS` (default 0, at most 1,000: the failsafe, design 2.5, the lent
-    /// source's and on a declared range the float-only source's too) and `REHYPO_SALT`. A value outside its bounds is refused, never cut to fit.
+    /// source's and on a declared range the float-only source's too), `FLOAT_VAULT` (a gage vault of `FLOAT_TOKEN`:
+    /// that side then lends too, at `LEND_FLOAT_BPS` and with the failsafe whatever the range), `FLOAT_FLOAT_BPS` (that
+    /// side's own float target, from 100; taken only on a priced, unpegged pool whose range is at least
+    /// `capFreeTicks` of its band), `REHYPO_SALT` and `STANDING` (default false; true stands the pool up on a
+    /// standing hook, `setUpStandingPool`, which a pegged pool and a priced one at its cap-free width take). A value
+    /// outside its bounds is refused, never cut to fit.
     function rehearse() external returns (Plugged memory p) {
         RehypoSourceSettings memory stable;
         stable.rangeTicks = uint24(_envBounded("RANGE_TICKS", 0, 0, MAX_RANGE_TICKS));
@@ -337,24 +370,24 @@ contract RehypoSource is Script {
             floor: uint24(_envBounded("FEE_FLOOR", FEE_FLOOR, FEE_FLOOR, MAX_FEE_CAP)),
             cap: uint24(_envBounded("FEE_CAP", FEE_CAP, FEE_FLOOR, MAX_FEE_CAP))
         });
-        p = setUpPool(
-            Pool({
-                factory: IGageRehypoSourceFactory(vm.envAddress("REHYPO_FACTORY")),
-                lend: IERC20(vm.envAddress("LEND_TOKEN")),
-                vault: vm.envAddress("LEND_VAULT"),
-                floatBps: uint16(_envBounded("LEND_FLOAT_BPS", 2000, MIN_FLOAT_BPS, BPS)),
-                floatOnly: IERC20(vm.envAddress("FLOAT_TOKEN")),
-                keeper: vm.envAddress("KEEPER"),
-                seedLend: vm.envUint("SEED_LEND"),
-                seedFloat: vm.envUint("SEED_FLOAT"),
-                salt: vm.envOr("REHYPO_SALT", bytes32(0)),
-                settings: settings,
-                price8: price8,
-                failsafeBps: uint16(_envBounded("FAILSAFE_BPS", 0, 0, MAX_FAILSAFE_BPS)),
-                pegBps: pegBps
-            }),
-            fee
-        );
+        Pool memory pool = Pool({
+            factory: IGageRehypoSourceFactory(vm.envAddress("REHYPO_FACTORY")),
+            lend: IERC20(vm.envAddress("LEND_TOKEN")),
+            vault: vm.envAddress("LEND_VAULT"),
+            floatBps: uint16(_envBounded("LEND_FLOAT_BPS", 2000, MIN_FLOAT_BPS, BPS)),
+            floatOnly: IERC20(vm.envAddress("FLOAT_TOKEN")),
+            floatVault: vm.envOr("FLOAT_VAULT", address(0)),
+            floatOnlyBps: uint16(_envBounded("FLOAT_FLOAT_BPS", 0, 0, BPS)),
+            keeper: vm.envAddress("KEEPER"),
+            seedLend: vm.envUint("SEED_LEND"),
+            seedFloat: vm.envUint("SEED_FLOAT"),
+            salt: vm.envOr("REHYPO_SALT", bytes32(0)),
+            settings: settings,
+            price8: price8,
+            failsafeBps: uint16(_envBounded("FAILSAFE_BPS", 0, 0, MAX_FAILSAFE_BPS)),
+            pegBps: pegBps
+        });
+        p = vm.envOr("STANDING", false) ? setUpStandingPool(pool, fee) : setUpPool(pool, fee);
         console2.log("lent source      ", address(p.lendSource));
         console2.log("float-only source", address(p.floatSource));
         console2.log("hook             ", address(p.hook));
@@ -371,6 +404,33 @@ contract RehypoSource is Script {
         return setUpPool(pool, FeeRule(address(0), PoolId.wrap(bytes32(0)), 0, 0));
     }
 
+    /// @notice The partner's set-up on a standing hook, whose position stays in the pool between keeper moves
+    /// (`StandingAnchoredHook`, `StandingAnchoredFailsafeHook` with the failsafe): as `setUpPool`, but the hook's address
+    /// carries no `afterSwap` flag, the hook is the keeper named on both sources and gage's keeper is named on the hook,
+    /// since a move sent to a source while the position is in the pool would size its float without it. The whole seed
+    /// goes in at once and nothing is in the pool until the first swap after the keeper's first move, which places the
+    /// position. Only where
+    /// the repeat rounds hold a standing position: a pegged pool, or a priced one whose range is at least
+    /// `capFreeTicks` of its band.
+    function setUpStandingPool(Pool memory pool) public returns (Plugged memory p) {
+        return setUpStandingPool(pool, FeeRule(address(0), PoolId.wrap(bytes32(0)), 0, 0));
+    }
+
+    /// @notice `setUpStandingPool` with a fee rule: a dynamic-fee pool on the standing fee hook of its kind
+    /// (`StandingAnchoredFeeHook`, `StandingAnchoredFailsafeFeeHook`).
+    function setUpStandingPool(Pool memory pool, FeeRule memory fee) public returns (Plugged memory p) {
+        require(
+            pool.settings.rangeTicks != 0
+                && (pool.pegBps != 0
+                    || (pool.settings.priceSource != address(0)
+                        && pool.settings.rangeTicks >= capFreeTicks(pool.settings.bandBps))),
+            "a standing hook is for a pegged pool, or a priced one whose range is at least the width at which its band's cap stops binding"
+        );
+        _standing = true;
+        p = setUpPool(pool, fee);
+        _standing = false;
+    }
+
     /// @notice `setUpPool` with a fee rule: the pool is then a dynamic-fee pool on the kit's fee hook, each swap paying
     /// what the rule's module quotes inside its bounds. No rule (a zero module) is the static-fee set-up.
     function setUpPool(Pool memory pool, FeeRule memory fee) public returns (Plugged memory p) {
@@ -378,6 +438,12 @@ contract RehypoSource is Script {
             block.chainid != MAINNET,
             "the rehearsal never runs on chain 4663: there the partner's Safe makes these calls"
         );
+        require(
+            !_floatTargetsDiffer(pool) || _pricedUnpegged(pool),
+            "a stable or pegged pool takes equal float targets on a declared range (docs/rehypo-source.md, item 6)"
+        );
+        string memory warning = floatTargetsWarning(pool);
+        if (bytes(warning).length != 0) console2.log("warning:", warning);
         address partner = msg.sender;
         IPoolManager poolManager = pool.factory.POOL_MANAGER();
         // The sources' addresses ahead of time: a Safe batch names them in the hook's constructor before they exist.
@@ -406,9 +472,16 @@ contract RehypoSource is Script {
         // 4. Each source takes the pool's hook as its one depositor.
         IGageRehypoSource(lendAt).bind(p.key);
         IGageRehypoSource(floatAt).bind(p.key);
-        // 5. gage's keeper rebalances both sides (the float-only one too, since the 8 November generation).
-        IGageRehypoSource(lendAt).setKeeper(pool.keeper, true);
-        IGageRehypoSource(floatAt).setKeeper(pool.keeper, true);
+        // 5. gage's keeper rebalances both sides (the float-only one too, since the 8 November generation). On a
+        // standing hook the sources name the hook alone, which moves both in one call, and the hook names the keeper.
+        if (_standing) {
+            IGageRehypoSource(lendAt).setKeeper(address(p.hook), true);
+            IGageRehypoSource(floatAt).setKeeper(address(p.hook), true);
+            StandingPosition(payable(address(p.hook))).setKeeper(pool.keeper, true);
+        } else {
+            IGageRehypoSource(lendAt).setKeeper(pool.keeper, true);
+            IGageRehypoSource(floatAt).setKeeper(pool.keeper, true);
+        }
         p.lendSource = IGageRehypoSource(lendAt);
         p.floatSource = IGageRehypoSource(floatAt);
         // 6. The seed, through the hook: on a declared stable pool a hundredth of it first, then the first keeper move,
@@ -467,16 +540,62 @@ contract RehypoSource is Script {
         floatOnly = Math.mulDiv(10 ** IERC20Metadata(address(pool.floatOnly)).decimals(), DRAW_COST_8, pool.price8);
     }
 
-    /// @dev The float-only source's target: all its backing on the full range, the lent side's on a declared range.
-    function _floatOnlyBps(Pool memory pool) internal pure returns (uint16) {
-        return pool.settings.rangeTicks == 0 ? ALL_FLOAT : pool.floatBps;
+    /// @dev Whether the other side keeps all its backing as float: on the full range with no vault of its own.
+    function _allFloat(Pool memory pool) internal pure returns (bool) {
+        return pool.settings.rangeTicks == 0 && pool.floatVault == address(0);
     }
 
-    /// @dev The float-only source's failsafe: the pool's on a declared range, where that source keeps the float beyond
-    /// its target closed and the anchored failsafe hooks ask both sources; none on the full range, where its whole
-    /// float is open already.
+    /// @dev The other source's target: its own where the pool names one (the partner's choice); else all its backing
+    /// while it is float-only on the full range, and the lent side's on a declared range and wherever it lends through
+    /// a vault of its own.
+    function _floatOnlyBps(Pool memory pool) internal pure returns (uint16) {
+        if (pool.floatOnlyBps != 0) return pool.floatOnlyBps;
+        return _allFloat(pool) ? ALL_FLOAT : pool.floatBps;
+    }
+
+    /// @dev Whether the pool declares a range and gives its two sides different float targets.
+    function _floatTargetsDiffer(Pool memory pool) internal pure returns (bool) {
+        return pool.settings.rangeTicks != 0 && _floatOnlyBps(pool) != pool.floatBps;
+    }
+
+    /// @dev A pool whose band follows a signed price and holds no peg: there the two float targets are the partner's.
+    function _pricedUnpegged(Pool memory pool) internal pure returns (bool) {
+        return pool.settings.priceSource != address(0) && pool.pegBps == 0;
+    }
+
+    /// @notice What the set-up says of a priced, unpegged pool's two float targets, or nothing: they are the
+    /// partner's to set. The repeat rounds hold targets that differ on a range at least `capFreeTicks` of its band
+    /// wide; narrower, a price resting off the anchor can drain the deeper side at every keeper pass
+    /// (docs/rehypo-source.md, item 6). A stable or pegged pool takes equal targets: `setUpPool` refuses others.
+    function floatTargetsWarning(Pool memory pool) public pure returns (string memory) {
+        if (!_floatTargetsDiffer(pool) || !_pricedUnpegged(pool)) return "";
+        if (pool.settings.rangeTicks >= capFreeTicks(pool.settings.bandBps)) return "";
+        return "the two float targets differ on a range under the width at which its band's cap stops binding: a price resting off the anchor can drain the deeper side at every keeper pass (docs/rehypo-source.md, item 6)";
+    }
+
+    /// @notice The narrowest declared range, in ticks, at which a priced source's cap inside a band of `bandBps`
+    /// either side stops binding, so the whole float target is open to swaps (`GageRehypoSource._inBandCap`): the
+    /// width from which the repeat rounds hold two float targets that differ. The largest `uint24` where no range
+    /// does it. About 1,600 ticks at a 0.5% band, a quarter of that at 0.25%.
+    /// @dev The band's width in ticks as the source counts it (`_bandTicks`, from the same two sqrt factors), then
+    /// the least `R` with `PAST_BAND_BPS * R * C >= 16 * w^2 * (R + C)`, `C` the source's `CONCENTRATION_TICKS`.
+    function capFreeTicks(uint16 bandBps) public pure returns (uint24) {
+        if (bandBps == 0 || bandBps >= BPS) return type(uint24).max;
+        uint256 lo = Math.sqrt(Math.mulDiv(BPS - bandBps, 1 << 192, BPS));
+        uint256 hi = Math.sqrt(Math.mulDiv(BPS + bandBps, 1 << 192, BPS));
+        uint256 w = Math.mulDiv(hi - lo, 20_001, lo) + 1;
+        uint256 need = CAP_ROUND * w * w;
+        uint256 have = PAST_BAND_BPS * CONCENTRATION_TICKS;
+        if (need >= have) return type(uint24).max;
+        uint256 ticks = Math.mulDiv(need, CONCENTRATION_TICKS, have - need, Math.Rounding.Ceil);
+        return ticks > MAX_RANGE_TICKS ? type(uint24).max : uint24(ticks);
+    }
+
+    /// @dev The other source's failsafe: the pool's on a declared range, where that source keeps the float beyond its
+    /// target closed and the anchored failsafe hooks ask both sources, and wherever it has a vault to draw on; none
+    /// while it is float-only on the full range, where its whole float is open already.
     function _floatOnlyFailsafe(Pool memory pool) internal pure returns (uint16) {
-        return pool.settings.rangeTicks == 0 ? 0 : pool.failsafeBps;
+        return _allFloat(pool) ? 0 : pool.failsafeBps;
     }
 
     /// @dev An environment value, or `fallback_` when unset, refused outside [`lo`, `hi`].
@@ -492,8 +611,9 @@ contract RehypoSource is Script {
         );
     }
 
-    /// @dev Where the factory will put the lent source (with the pool's failsafe) and the float-only one (on a declared
-    /// range the lent side's float target and the same failsafe; on the full range all float and none).
+    /// @dev Where the factory will put the lent source (with the pool's failsafe) and the other one (with its own vault,
+    /// or on a declared range, the lent side's float target and the same failsafe; float-only on the full range, all
+    /// float and none).
     function _predictSources(Pool memory pool, address partner)
         internal
         view
@@ -516,7 +636,7 @@ contract RehypoSource is Script {
             .predict(
                 partner,
                 pool.floatOnly,
-                address(0),
+                pool.floatVault,
                 partner,
                 partner,
                 _floatOnlyBps(pool),
@@ -548,7 +668,7 @@ contract RehypoSource is Script {
             pool.factory
                 .create(
                     pool.floatOnly,
-                    address(0),
+                    pool.floatVault,
                     partner,
                     partner,
                     _floatOnlyBps(pool),
@@ -655,6 +775,23 @@ contract RehypoSource is Script {
         // In currency order: the lent side's first when it is currency0.
         (uint256 drawFee0, uint256 drawFee1) = _drawFees(pool);
         if (!lendFirst) (drawFee0, drawFee1) = (drawFee1, drawFee0);
+        if (_standing) {
+            return _deployStandingHook(
+                FailsafeFeeArgs({
+                    poolManager: poolManager,
+                    source0: source0,
+                    source1: source1,
+                    drawFee0: drawFee0,
+                    drawFee1: drawFee1,
+                    forgonePips: FORGONE_PIPS,
+                    floor: fee.floor,
+                    cap: fee.cap,
+                    module: fee.module,
+                    poolId: fee.poolId
+                }),
+                pool.failsafeBps != 0
+            );
+        }
         if (fee.module == address(0)) {
             return _deployHook(poolManager, source0, source1, pool.failsafeBps != 0, drawFee0, drawFee1);
         }
@@ -745,13 +882,52 @@ contract RehypoSource is Script {
         require(address(hook) == at, "hook address differs from the mined one");
     }
 
+    /// @dev The kit's standing hook of the pool's kind, at an address with a standing hook's flags: with the failsafe
+    /// `StandingAnchoredFailsafeHook`, with a fee rule (`a.module` set) `StandingAnchoredFeeHook`, with both
+    /// `StandingAnchoredFailsafeFeeHook`, else `StandingAnchoredHook`, each given the anchored hook's constructor
+    /// arguments. Deployed through the deterministic deployer by its own call, as a broadcast `new` with a salt is.
+    function _deployStandingHook(FailsafeFeeArgs memory a, bool failsafe)
+        internal
+        virtual
+        returns (UnlockCheckedHook hook)
+    {
+        bool feeRule = a.module != address(0);
+        bytes memory initCode;
+        if (failsafe && feeRule) {
+            initCode = abi.encodePacked(type(StandingAnchoredFailsafeFeeHook).creationCode, abi.encode(a));
+        } else if (feeRule) {
+            initCode = abi.encodePacked(
+                type(StandingAnchoredFeeHook).creationCode,
+                abi.encode(a.poolManager, a.source0, a.source1, a.floor, a.cap, a.module, a.poolId)
+            );
+        } else if (failsafe) {
+            initCode = abi.encodePacked(
+                type(StandingAnchoredFailsafeHook).creationCode,
+                abi.encode(a.poolManager, a.source0, a.source1, a.drawFee0, a.drawFee1, a.forgonePips)
+            );
+        } else {
+            initCode = abi.encodePacked(
+                type(StandingAnchoredHook).creationCode, abi.encode(a.poolManager, a.source0, a.source1)
+            );
+        }
+        (address at, bytes32 salt) = _mineHookAt(initCode, STANDING_HOOK_FLAGS);
+        (bool deployed,) = CREATE2_FACTORY.call(abi.encodePacked(salt, initCode));
+        require(deployed && at.code.length != 0, "the standing hook did not deploy at the mined address");
+        hook = UnlockCheckedHook(payable(at));
+    }
+
     /// @dev A CREATE2 salt that puts `initCode` at an address with exactly the reference hook's permission flags and
     /// no code yet: HookMiner's rule and search, with the init code hashed once rather than at every salt.
     function _mineHook(bytes memory initCode) internal view returns (address at, bytes32 salt) {
+        return _mineHookAt(initCode, HOOK_FLAGS);
+    }
+
+    /// @dev `_mineHook` for an address with exactly `flags`.
+    function _mineHookAt(bytes memory initCode, uint160 flags) internal view returns (address at, bytes32 salt) {
         bytes32 codeHash = keccak256(initCode);
         for (uint256 i; i < 160_444; ++i) {
             at = address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xFF), CREATE2_FACTORY, i, codeHash)))));
-            if (uint160(at) & Hooks.ALL_HOOK_MASK == HOOK_FLAGS && at.code.length == 0) return (at, bytes32(i));
+            if (uint160(at) & Hooks.ALL_HOOK_MASK == flags && at.code.length == 0) return (at, bytes32(i));
         }
         revert("no hook salt found");
     }
