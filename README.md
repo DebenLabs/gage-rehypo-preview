@@ -25,6 +25,7 @@ guides, and a note on everything that runs off-chain.
 | [docs/offchain.md](docs/offchain.md) | Everything that runs off-chain: gage's keeper, prices, lending, the hook check, and your side. | |
 | `docs/integrate/` | Partner guides: [DEX partners](docs/integrate/dex-partners.md), [partner vaults](docs/integrate/partner-vaults.md), [fills](docs/integrate/fills.md), [the exit desk](docs/integrate/exit-desk.md), [generations](docs/integrate/generations.md). | |
 | [PARTNERS.md](PARTNERS.md) | The steps with gage, from a hook to a served pool. | |
+| `backtests/` | Replays of real swaps through a model of the source: how much of a stable or a stock pool can be lent while its swaps still fill. Its [README](backtests/README.md) has the tables, the data and the limits. | MIT |
 
 ## New in the 11 November cut
 
