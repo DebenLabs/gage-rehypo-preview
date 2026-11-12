@@ -1,4 +1,4 @@
-"""A stable pair's real swaps and the signed price at each keeper pass."""
+"""A stable pair's real swaps, and the keeper-pass grid."""
 import json
 import math
 import os
@@ -7,17 +7,20 @@ import numpy as np
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 BT = np.array(json.load(open(f"{DATA}/blocktimes.json")), float)
-WINDOW = 30 * 86400
+WINDOW = 60 * 86400  # or the pool's whole life, where that is shorter
 PASS = 300
-RATE_USDG = 0.0409  # what the USDG vault's reserve paid a year on 10 November 2026
-BORROW = 0.07  # assumed: what borrowers pay a year on the other stablecoin
 TERM = 14 * 86400.0
+SNAPSHOT_BLOCK = 112796665  # 12 November 2026
 
-# side 0 = the pool's currency0; vmode 0 = a USDG vault with a reserve (all of it can be withdrawn), 1 = a plain vault
+# coins and held: the pool's two coins in its own order (currency0, currency1), and the dollars of each it held at the
+# snapshot block, summed from its liquidity events. ranges: the two declared ranges the run tries, in ticks (full width).
 POOLS = {
-    "frxusd_usdg": dict(file="frxusd_usdg.npz", d0=18, d1=6, name="frxUSD/USDG", vmode=(1, 0), today=25e3),
-    "eusd_usdg": dict(file="eusd_usdg.npz", d0=6, d1=18, name="eUSD/USDG", vmode=(0, 1), today=100e3),
+    "frxusd_usdg": dict(file="frxusd_usdg.npz", d0=18, d1=6, name="frxUSD/USDG", coins=("frxUSD", "USDG"), held=(9558.75, 12423.17), ranges=(50.0, 100.0)),
+    "eusd_usdg": dict(file="eusd_usdg.npz", d0=6, d1=18, name="eUSD/USDG", coins=("USDG", "eUSD"), held=(94963.96, 63832.35), ranges=(100.0, 200.0)),
+    "frxusd_ausd": dict(file="frxusd_ausd.npz", d0=18, d1=18, name="frxUSD/aUSD", coins=("frxUSD", "aUSD"), held=(104129.02, 176226.88), ranges=(40.0, 100.0)),
 }
+# Whether gage had a lend generation for the coin on 12 November 2026: without one, the coin out of the pool cannot be lent.
+LENDABLE = {"USDG": True, "frxUSD": True, "eUSD": False, "aUSD": False}
 
 
 def load(key):
@@ -40,12 +43,3 @@ def prep(key):
     q = np.where(idx >= 0, m["p"][np.clip(idx, 0, None)], m["p0"][0])
     k = t >= T[0]
     return dict(t=t[k], d=m["dir"][k].astype(np.int64), A=m["size"][k], f=m["fee"][k], p0=m["p0"][k], T=T, q=q)
-
-
-def signed(key, T):
-    """(signed price in the pool's order, the other coin's price in USDG) at each pass; never from the pool itself."""
-    if key == "frxusd_usdg":  # frxUSD over USDG from hourly market prices, read at each pass
-        z = np.load(f"{DATA}/frxusd_usdg_signed.npz")
-        assert np.array_equal(z["T"], T), "the pass grid moved"
-        return z["x"], z["x"]
-    return np.ones(len(T)), np.ones(len(T))  # eUSD has no outside price here: a flat $1
