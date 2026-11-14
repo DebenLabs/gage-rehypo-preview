@@ -15,8 +15,9 @@ guides, and a note on everything that runs off-chain.
 
 | Path | What | Licence |
 | --- | --- | --- |
-| `src/rehypo/GageRehypoSource.sol`, `GageRehypoSourceFactory.sol` | The source and its factory: the float, the vault, declared ranges, priced and pegged sources, the failsafe, the draw for a source with no vault. | BUSL-1.1 ([LICENSE](LICENSE)) |
+| `src/rehypo/GageRehypoSource.sol`, `GageRehypoSourceFactory.sol` | The source and its factory: the float, the vault, declared ranges, priced and pegged sources, the failsafe, the draw for a source with no vault, the pull when a price check fails. | BUSL-1.1 ([LICENSE](LICENSE)) |
 | `src/rehypo/RehypoPriceRouter.sol`, `RehypoParPriceSource.sol`, `src/oneday/NuntiusPriceSource.sol` | Each token's price feed: a signed price, or one USDG for a dollar stable nobody signs a price for. | BUSL-1.1 |
+| `src/rehypo/RehypoNavPriceSource.sol`, `RehypoGuardedPriceSource.sol` | A fund token on a daily NAV its manager signs, held to on-chain limits and braked by a London price; quoted in frxUSD at a dollar inside a peg check, every refusal a pull. | BUSL-1.1 |
 | `integrations/lender-amm/` | The hooks (`UnlockCheckedHook`, its failsafe, anchored and fee forms, and the standing hooks), the set-up script and the tests. Its [README](integrations/lender-amm/README.md) says what each file is. | MIT ([LICENSE-MIT](LICENSE-MIT)) |
 | `interfaces/` | What your hook, your Safe and your tools call: the source, its factory, a partner vault, the vault factory and its registry. | MIT |
 | `abi/` | The ABIs of the contracts in `src/`. | |

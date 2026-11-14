@@ -88,6 +88,14 @@ struct RehypoSourceSettings {
 /// `_inBandCap`: its centre is the signed price, never more than `PEG_BPS` from a dollar and moving at most
 /// `CENTRE_MOVE_BPS` an hour, so the band sits on the market rather than on a parity the market may rest away from.
 /// Past the band it caps the swap float as any declared range does.
+///
+/// A priced source pulls rather than freezes when its price source answers a refusal with a zero value, as a
+/// `RehypoGuardedPriceSource` does (the plain router's feeds revert instead, and a source on them keeps the freeze
+/// above): a keeper move that finds no price sets `centreAt` to 1 and the failsafe's room to zero, leaves the centre
+/// and the swap float where they were, and moves nothing through the vault, but no swap takes anything from the source
+/// (`maxWithdraw` inside an unlock is zero) until a keeper move finds a price again, which sets the centre as the first
+/// report did. LP entries and exits go on. Such a price source may value in a dollar token other than USDG (frxUSD, at
+/// a dollar inside a peg check): `QUOTE` is whatever the price source values in.
 contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IUnlockCallback {
     using SafeERC20 for IERC20;
     using PoolIdLibrary for PoolKey;
@@ -145,6 +153,8 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
     uint16 internal constant MAX_PEG_BPS = 100;
     /// @dev One in sqrt-price units.
     uint256 internal constant Q96 = 1 << 96;
+    /// @dev A pulled priced source's `centreAt`: one second after the epoch, which no keeper move's block has.
+    uint40 internal constant PULLED_AT = 1;
 
     /// @notice The Uniswap v4 PoolManager that holds the float as claims and whose lock separates swaps from the rest.
     IPoolManager public immutable POOL_MANAGER;
@@ -162,7 +172,8 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
     IRehypoPriceSource public immutable PRICE_SOURCE;
     /// @notice The pool token a priced source's price is of; zero for a stable source.
     address public immutable PRICED_TOKEN;
-    /// @notice The price source's USDG, the pool's other token; zero for a stable source.
+    /// @notice What the price source values in (its `USDG()`: USDG, or the dollar token a guarded price source quotes
+    /// in), the pool's other token; zero for a stable source.
     address public immutable QUOTE;
     /// @notice A priced source's band either side of its centre, in basis points of the price.
     uint16 public immutable BAND_BPS;
@@ -211,7 +222,8 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
     /// @notice Until when the last LP exit holds what its sales pay: no sweep and no `endExit` before then.
     uint40 public exitHeldUntil;
     /// @notice A priced source's band centre, as a v4 sqrt price, and when it was set; zero before its first
-    /// `rebalanceAt`.
+    /// `rebalanceAt`. A `centreAt` of 1 means the last keeper move found no price and pulled the swap float (`Pulled`):
+    /// the centre is the last one set, and no swap takes anything from this source until a keeper move finds a price.
     uint160 public centre;
     uint40 public centreAt;
     /// @notice Until when a priced source moves nothing after its Stock Token's multiplier changed.
@@ -271,6 +283,9 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
     event Centred(uint160 reported, uint160 centre);
     /// @notice A priced source saw its Stock Token's multiplier change, and moves nothing until `heldUntil`.
     event MultiplierChanged(uint256 previous, uint256 current, uint40 heldUntil);
+    /// @notice A priced source's keeper move found no price (its price source valued the priced token at zero) and
+    /// pulled the swap float: no swap takes anything from it until a keeper move finds a price.
+    event Pulled();
     /// @notice The failsafe drew `assets` from the vault into the float and the swap float, inside a swap's unlock; a
     /// source with no vault opened that much more of its float to swaps.
     event VaultDrawn(uint256 assets);
@@ -436,13 +451,13 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
         return maxDeposit(receiver);
     }
 
-    /// @notice What the depositor can withdraw now: inside an unlock, the float up to the swap float; outside it, the
-    /// float, what the exit desk owes this source and the vault's free cash, or nothing while the vault is settling. Zero
-    /// for anyone else.
+    /// @notice What the depositor can withdraw now: inside an unlock, the float up to the swap float, or nothing while
+    /// the source is pulled; outside it, the float, what the exit desk owes this source and the vault's free cash, or
+    /// nothing while the vault is settling. Zero for anyone else.
     function maxWithdraw(address owner) public view override returns (uint256) {
         if (owner != depositor || owner == address(0)) return 0;
         uint256 owned = _convertToAssets(balanceOf(owner), Math.Rounding.Floor);
-        if (POOL_MANAGER.isUnlocked()) return Math.min(owned, Math.min(_float(), swapFloat));
+        if (POOL_MANAGER.isUnlocked()) return _pulled() ? 0 : Math.min(owned, Math.min(_float(), swapFloat));
         if (_settling()) return 0;
         return Math.min(owned, _float() + _owed() + _vaultFree());
     }
@@ -514,7 +529,9 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
     /// `MULTIPLIER_HOLD` after. Reverts whatever the price source refuses (a stale report, too few sources, an unnamed
     /// signer, a token under a corporate action), a report signed no later than the last one it centred on, a price
     /// no v4 pool can hold, and on a pegged source a price further than `PEG_BPS` from a dollar (`OffPeg`), leaving
-    /// swaps as they are. Keepers only, outside an unlock.
+    /// swaps as they are. A zero value (a guarded price source's refusal, or a Stock Token multiplier of zero) pulls
+    /// instead (`Pulled`): `centreAt` becomes 1, the failsafe's room zero, and no swap takes anything from this source
+    /// until a keeper move finds a price. Keepers only, outside an unlock.
     /// @param report An ABI-encoded Nuntius signed price for `PRICED_TOKEN`, as `NuntiusPriceSource.valueOf` takes it.
     function rebalanceAt(bytes calldata report) external nonReentrant {
         _keeperMove(true);
@@ -539,7 +556,15 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
         if (observedAt <= reportAt) revert StaleReport(observedAt, reportAt);
         reportAt = SafeCast.toUint40(observedAt);
         if (stock) value = Math.mulDiv(value, m, 1e18);
-        if (value == 0) revert NoPrice();
+        if (value == 0) {
+            // No price: pull rather than leave the last position trading. Nothing moves through the vault; the
+            // centre stays, its time becomes `PULLED_AT` (a second no keeper move has), and no swap takes any of the
+            // swap float until a keeper move finds a price again, which then sets the centre as the first report did.
+            centreAt = PULLED_AT;
+            failsafeLeft = 0;
+            emit Pulled();
+            return;
+        }
         if (value < PEG_LO || value > PEG_HI) revert OffPeg();
         // The pool's price is token1 per token0 in raw units: USDG per priced token when that sorts first.
         uint256 reported = priced < QUOTE ? _sqrtPriceOf(value, PRICE_PROBE) : _sqrtPriceOf(PRICE_PROBE, value);
@@ -1164,6 +1189,12 @@ contract GageRehypoSource is ERC4626, Ownable2Step, ReentrancyGuardTransient, IU
         IRehypoVault v = vault;
         if (address(v) == address(0)) return 0;
         return Math.min(v.maxWithdraw(address(this)), _liveVaultAssets());
+    }
+
+    /// @dev Whether a priced source's last keeper move found no price and pulled its swap float: its centre's time is
+    /// `PULLED_AT`. Zero before the first keeper move; every move that centres sets the block's time.
+    function _pulled() internal view returns (bool) {
+        return centreAt == PULLED_AT;
     }
 
     /// @dev Whether the vault is between a loan's end and its settle; never without a vault.
