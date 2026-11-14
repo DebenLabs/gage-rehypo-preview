@@ -5,7 +5,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 /// @notice A rehypo source: an ERC-4626 vault per pool token that a partner's hook deposits into. Generated from its build.
-/// @dev Generated from the build of `src/rehypo/GageRehypoSource.sol` at 7a04313b1096.
+/// @dev Generated from the build of `src/rehypo/GageRehypoSource.sol` at aecb66146b1c.
 interface IGageRehypoSource {
     struct RehypoSourceSettings {
         uint24 rangeTicks;
@@ -77,6 +77,7 @@ interface IGageRehypoSource {
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event PocketsClaimed(uint256[] pocketIds, uint256 proceeds);
+    event Pulled();
     event Rebalanced(uint256 swept, uint256 refilled, uint256 swapFloat);
     event RewardsClaimed(uint256 amount);
     event Transfer(address indexed from, address indexed to, uint256 value);

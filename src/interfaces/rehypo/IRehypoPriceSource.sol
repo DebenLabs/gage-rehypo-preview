@@ -17,7 +17,9 @@ interface IRehypoPriceSource {
     /// @notice What `amount` raw units of `token` are worth in raw units of `USDG()` at the signed price in `report`,
     /// one whole token per share (no Stock Token multiplier), and when it was signed.
     /// @dev Reverts on a stale or future report, too few sources, an unnamed signer, a token without an asset, a Stock
-    /// Token under a corporate action (`oraclePaused()`) or a zero value.
+    /// Token under a corporate action (`oraclePaused()`) or a zero value. A guarded price source
+    /// (`RehypoGuardedPriceSource`) instead answers every refusal with a zero value, observed now, which a priced
+    /// rehypo source takes as no price and pulls its swap float.
     function valueOf(address token, uint256 amount, bytes calldata report)
         external
         view
